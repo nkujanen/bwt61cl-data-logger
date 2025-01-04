@@ -8,7 +8,9 @@ from datetime import datetime
 PORT = "COM3"  # COM port of the sensor
 BAUD_RATE = 115200  # Baud rate for the serial connection
 PACKET_HEADER = 0x55  # Header for all packets
+PACKET_TYPES = [0x51, 0x52, 0x53] # Headers for each packet type
 PACKET_LENGTH = 11  # Length of each data packet
+DATA_BLOCK_LENGTH = 3*PACKET_LENGTH # Length of three data packets
 
 def generate_filename(base_name, extension):
     """
@@ -22,9 +24,42 @@ def generate_filename(base_name, extension):
     filename = f"{base_name}_{timestamp}{extension}"
     return filename
 
-def decode_packet(packet):
+def validate_headers(buffer):
     """
-    Decodes a single packet of data.
+    Validates that the buffer has all three packets in the correct order.
+    This is done by checking the packet header positions.
+    Each packet should start with 0x55 and the following byte
+    should be the packet type [0x51, 0x52, 0x53].
+
+    Args:
+        buffer (bytearray): encoded packets 
+    """
+    if(
+        buffer[0] == PACKET_HEADER and
+        buffer[1] == PACKET_TYPES[0] and
+        buffer[11] == PACKET_HEADER and
+        buffer[12] == PACKET_TYPES[1] and
+        buffer[22] == PACKET_HEADER and
+        buffer[23] == PACKET_TYPES[2]
+    ):
+        return True
+
+def validate_checksums(buffer):
+    """
+    Validates the checksums for all three packets.
+
+    Args:
+        buffer (bytearray): encoded packets 
+    """
+    for i in range(0, DATA_BLOCK_LENGTH, PACKET_LENGTH):
+        if sum(buffer[i:i+10]) & 0xFF != buffer[i+10]:  # Take the 8 least significant bits
+            return False
+    return True
+
+def decode_data(encoded):
+    """
+    Decodes a data block of three packets. 
+    The data should be validated before passing it through the decoding function.
     Each packet is 11 bytes and follows the structure:
 
     0: Packet header (0x55)
@@ -36,81 +71,70 @@ def decode_packet(packet):
     10: Checksum
     
     Args:
-        packet (bytearray): encoded packet
+        encoded (bytearray): encoded data block
+    Returns: 
+        float: acceleration (ax, ay, az)
+        float: angular velocity (wx, wy, wz)
+        float: angle (roll, pitch, yaw)
+        float: temperature (T)
     """
-    packet_type = packet[1]
-    x = y = z = T = 0  # Initialise variables
-    
-    # Unpack the data as signed short
-    if packet_type == 0x51:  # Acceleration packet
-        x = struct.unpack("<h", packet[2:4])[0] / 32768.0 * 16
-        y = struct.unpack("<h", packet[4:6])[0] / 32768.0 * 16
-        z = struct.unpack("<h", packet[6:8])[0] / 32768.0 * 16
-    elif packet_type == 0x52:  # Angular velocity packet
-        x = struct.unpack("<h", packet[2:4])[0] / 32768.0 * 2000
-        y = struct.unpack("<h", packet[4:6])[0] / 32768.0 * 2000
-        z = struct.unpack("<h", packet[6:8])[0] / 32768.0 * 2000
-    elif packet_type == 0x53:  # Angle packet
-        x = struct.unpack("<h", packet[2:4])[0] / 32768.0 * 180
-        y = struct.unpack("<h", packet[4:6])[0] / 32768.0 * 180
-        z = struct.unpack("<h", packet[6:8])[0] / 32768.0 * 180
-    
-    # Every valid packet comes with a temperature reading
-    T = struct.unpack("<h", packet[8:10])[0] / 340.0 + 36.25
-    return packet_type, x, y, z, T
+    # Acceleration packet (first 11 bytes)
+    ax = struct.unpack("<h", encoded[2:4])[0] / 32768.0 * 16
+    ay = struct.unpack("<h", encoded[4:6])[0] / 32768.0 * 16
+    az = struct.unpack("<h", encoded[6:8])[0] / 32768.0 * 16
 
-def log_line(data, timestamp, file):
+    # Angular velocity packet (second 11 bytes)
+    wx = struct.unpack("<h", encoded[13:15])[0] / 32768.0 * 2000
+    wy = struct.unpack("<h", encoded[15:17])[0] / 32768.0 * 2000
+    wz = struct.unpack("<h", encoded[17:19])[0] / 32768.0 * 2000
+
+    # Angle packet (last 11 bytes)
+    roll = struct.unpack("<h", encoded[24:26])[0] / 32768.0 * 180
+    pitch = struct.unpack("<h", encoded[26:28])[0] / 32768.0 * 180
+    yaw = struct.unpack("<h", encoded[28:30])[0] / 32768.0 * 180
+
+    # Every valid packet comes with a temperature reading
+    T = struct.unpack("<h", encoded[8:10])[0] / 340.0 + 36.25
+
+    return ax, ay, az, wx, wy, wz, roll, pitch, yaw, T
+
+def log_line(data, time, file):
     """
     Writes a single line of decoded data on the log file.
     
     Args:
         data (array): decoded data
-        timestamp (float): timestamp
+        time (float): timestamp
         file (file): target file
     """    
-    packet_type, x, y, z, T = data
+    ax, ay, az, wx, wy, wz, roll, pitch, yaw, T = data
 
-    if packet_type == 0x51:  # Acceleration
-        line = f"{timestamp},{x:.3f},{y:.3f},{z:.3f},NaN,NaN,NaN,NaN,NaN,NaN,{T:.3f}\n"
-    elif packet_type == 0x52:  # Angular velocity
-        line = f"{timestamp},NaN,NaN,NaN,{x:.3f},{y:.3f},{z:.3f},NaN,NaN,NaN,{T:.3f}\n"
-    elif packet_type == 0x53:  # Angle
-        line = f"{timestamp},NaN,NaN,NaN,NaN,NaN,NaN,{x:.3f},{y:.3f},{z:.3f},{T:.3f}\n"
+    line = (
+        f"{time},{ax:.3f},{ay:.3f},{az:.3f},"
+        f"{wx:.3f},{wy:.3f},{wz:.3f},"
+        f"{roll:.3f},{pitch:.3f},{yaw:.3f},{T:.3f}\n"
+    )
 
     file.write(line)
     file.flush()
 
-def update_state(state, data):
+def update_console(data, time):
     """
-    Updates the state array with the most recent data.
+    Displays the current readings on a single line on the console.
     
     Args:
-        state (array): current state
         data (array): decoded data
+        time (float): timestamp
     """
-    packet_type, x, y, z, T = data
+    ax, ay, az, wx, wy, wz, roll, pitch, yaw, T = data
 
-    if packet_type == 0x51:  # Acceleration
-        state["ax"], state["ay"], state["az"] = x, y, z
-    elif packet_type == 0x52:  # Angular velocity
-        state["wx"], state["wy"], state["wz"] = x, y, z
-    elif packet_type == 0x53:  # Angle
-        state["roll"], state["pitch"], state["yaw"] = x, y, z
+    line = (
+        f"\rTime: {time:.2f} | Ax: {ax:6.2f} Ay: {ay:6.2f} Az: {az:6.2f} | "
+        f"Wx: {wx:7.2f} Wy: {wy:7.2f} Wz: {wz:7.2f} | "
+        f"Roll: {roll:7.2f} Pitch: {pitch:7.2f} Yaw: {yaw:7.2f} | T: {T:4.2f}"
+    )
 
-    # Temperature is always recorded
-    state["T"] = T
-
-    return state
-
-def update_console(state, timestamp):
-    """
-    Displays the current state on a single line on the console.
-    
-    Args:
-        state (array): current state
-        timestamp (float): timestamp
-    """
-    sys.stdout.write(f"\rTime: {timestamp:.2f} | Ax: {state['ax']:.3f} Ay: {state['ay']:.3f} Az: {state['az']:.3f} | Wx: {state['wx']:.3f} Wy: {state['wy']:.3f} Wz: {state['wz']:.3f} | Roll: {state['roll']:.3f} Pitch: {state['pitch']:.3f} Yaw: {state['yaw']:.3f} | T: {state['T']:.3f}    ")
+    sys.stdout.write(line)
     sys.stdout.flush()
 
 def main():
@@ -118,58 +142,48 @@ def main():
     Main function to read and log data.
     """
     try:
-        ser = serial.Serial(PORT, BAUD_RATE, timeout=1)
+        ser = serial.Serial(PORT, BAUD_RATE, timeout=2)
         print(f"Connected to {PORT} at {BAUD_RATE} baud.")
 
         # Prepare the log file
         log_filename = generate_filename("log", ".csv")
         with open(log_filename, "w") as log_file:
             log_file.write("time,ax,ay,az,wx,wy,wz,roll,pitch,yaw,T\n")  # CSV header
-            
-            # Initialise invalid checksum counter
-            checksum_count = 0
 
             # Initialise buffer to hold incoming bytes
             buffer = bytearray()
 
-            # Initialise current state for console updates
-            state = {
-                "ax": 0, "ay": 0, "az": 0,
-                "wx": 0, "wy": 0, "wz": 0,
-                "roll": 0, "pitch": 0, "yaw": 0,
-                "T": 0
-            }
+            # Initialise start time
+            start_time = time.time()
 
             while True:
-                # Read a single byte
-                byte = ser.read(1)
+                # Read data block of 33 bytes and add them to a buffer
+                buffer += ser.read(DATA_BLOCK_LENGTH - len(buffer))
 
-                if not byte:
-                    continue  # If no byte is read, loop again
-
-                # Ensure the first byte is the PACKET_HEADER
-                if len(buffer) == 0 and byte[0]!= PACKET_HEADER:
+                # Loop again if failed to read the full data block
+                if len(buffer) < DATA_BLOCK_LENGTH:
                     continue
 
-                buffer.append(byte[0])
+                # Validate header positions
+                while not validate_headers(buffer):
+                    buffer.pop(0)   # Roll the buffer by one
+                    buffer += ser.read(1)
 
-                # If buffer has enough bytes for a packet
-                if len(buffer) == PACKET_LENGTH:
-                    
-                    # Validate checksum
-                    checksum = sum(buffer[:10]) & 0xFF # Take the 8 least significant bits
-                    if checksum != buffer[10]:
-                        checksum_count += 1
+                # Validate packet checksums
+                if not validate_checksums(buffer):
+                    buffer.clear()  # Clear the buffer
+                    continue        # Restart the loop
 
-                    else:
-                        decoded = decode_packet(buffer)
-                        if decoded:
-                            timestamp = time.time()
-                            log_line(decoded, timestamp, log_file)  # Write the received data on the log file
-                            state = update_state(state, decoded)    # Update the current state
-                            update_console(state, timestamp)        # Display the updated state on console
+                # Decode and log the data
+                decoded_data = decode_data(buffer)
+                if decoded_data:
+                    timestamp = time.time()
+                    elapsed_time = timestamp - start_time
+                    log_line(decoded_data, timestamp, log_file)
+                    update_console(decoded_data, elapsed_time)
 
-                    buffer.clear()
+                # Clear the buffer after the data block has been processed
+                buffer.clear()
 
     except serial.SerialException as e:
         print(f"Error: {e}")
@@ -180,8 +194,6 @@ def main():
     finally:
         if ser:
             ser.close()
-        # Optional: uncomment to display number of invalid packets when exiting.
-        #print(f"Number of packets with invalid checksum: {checksum_count}.")
 
 if __name__ == "__main__":
     main()

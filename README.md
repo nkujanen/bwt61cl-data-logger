@@ -79,3 +79,18 @@ pip install -r requirements.txt
 2. In the Bluetooth and other devices window, scroll down and click **More Bluetooth options**.
 
 3. Click **COM Ports** in the window that just opened. Find your sensor in the **Name** column and choose the COM port with **Outgoing** direction.
+
+## Changelog
+
+### v.1.1 - 04/01/2025
+
+- Refractored code to improve logic and readability.
+- Grouped packets in sets of 3 under the same timestamp (previously logged individually). 
+- Revised logging to simplify post-processing of sensor data.
+
+### v1.0 - 31/12/2024
+
+- Initial release.
+- Logs acceleration, angular velocity, angle, and temperature data.
+- Compatible with sensors using the WT61 communication protocol.
+- Outputs data in CSV format and displays live readings in the console.
